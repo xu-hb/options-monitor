@@ -23,6 +23,8 @@ from src.application.cc_lp_candidate_snapshot import (
 from src.application.ledger.api import (
     CURRENT_DECISION_READ_SCHEMA,
     CurrentDecisionProjectionError,
+    build_lifecycle_quality_fact,
+    derive_lifecycle_quality_view,
     validate_current_decision_projection_payload,
 )
 from src.application.combo_yield_candidate_snapshot import (
@@ -42,6 +44,10 @@ from src.application.prepared_option_positions_context import (
 )
 from src.application.prepared_portfolio_context import (
     PREPARED_PORTFOLIO_CONTEXT_SCHEMA,
+)
+from src.application.required_data_blobs import (
+    RequiredDataBlobError,
+    validate_required_data_scan_blob_ref,
 )
 from src.application.required_data_snapshot import (
     REQUIRED_DATA_SNAPSHOT_MANIFEST_SCHEMA,
@@ -576,14 +582,18 @@ def assemble_runtime_portfolio_snapshot(
             "prepared option current decision shadow mismatch",
         )
     shadow_status = str(shadow.get("status") or "")
+    empty_absent_decision = _is_empty_absent_current_decision(current_read)
     ledger_shadow_status = (
         "matched"
-        if snapshot_status == "trusted"
-        and (
-            decision.get("actionable") is True
-            or option_context.get("decision_snapshot_actionable") is True
+        if empty_absent_decision
+        or (
+            snapshot_status == "trusted"
+            and (
+                decision.get("actionable") is True
+                or option_context.get("decision_snapshot_actionable") is True
+            )
+            and shadow_status == "matched"
         )
-        and shadow_status == "matched"
         else "mismatched"
         if shadow_status == "mismatch"
         else "unavailable"
@@ -595,12 +605,13 @@ def assemble_runtime_portfolio_snapshot(
         legacy_chosen_results=chosen,
         ledger_shadow_status=ledger_shadow_status,
     )
-    if ledger_shadow_status != "matched":
-        unavailable = {
-            "status": "unavailable",
-            "reason_codes": [f"legacy_comparison:{comparison['status']}"],
-        }
-        sections["ledger_projection"]["completeness"] = unavailable
+    sections["ledger_projection"]["completeness"] = (
+        _ledger_projection_completeness(
+            option_manifest=option_manifest,
+            current=sections["ledger_projection"]["facts"]["current_decision"],
+            comparison=comparison,
+        )
+    )
 
     by_role = {row["role"]: row for row in bindings}
     required_ready = [
@@ -1175,30 +1186,16 @@ def _validate_source_bindings(
         _fail("SOURCE_BINDING_INVALID", "ledger freshness must be not_applicable")
     _validate_current_decision_truth(ledger, expected_account=ledger["account"])
     option_status = option_manifest["status"]
-    comparison_by_name = {row["section"]: row for row in comparison["sections"]}
-    ledger_status = (
-        "complete"
-        if option_status == "ready"
-        and ledger["facts"]["current_decision"]["status"] == "trusted"
-        and comparison_by_name["ledger_projection"]["mismatch_count"] == 0
-        else "unavailable"
-    )
     option_status_expected = (
         "complete"
-        if option_status == "ready" and ledger["facts"]["current_decision"]["status"] == "trusted"
+        if option_status == "ready"
         else "unavailable"
     )
     option_reasons = _manifest_reason_codes(option_manifest)
-    ledger_reasons = list(option_reasons)
-    current = ledger["facts"]["current_decision"]
-    if current["status"] != "trusted":
-        ledger_reasons.append(str(current.get("reason") or f"current_decision:{current['status']}"))
-    if comparison_by_name["ledger_projection"]["mismatch_count"]:
-        ledger_reasons.append(f"legacy_comparison:{comparison['status']}")
-    ledger_completeness = _completeness(
-        ledger_status,
-        ledger_reasons if ledger_status != "complete" else [],
-        path="ledger_projection",
+    ledger_completeness = _ledger_projection_completeness(
+        option_manifest=option_manifest,
+        current=ledger["facts"]["current_decision"],
+        comparison=comparison,
     )
     occupation_completeness = _completeness(
         option_status_expected,
@@ -1556,7 +1553,7 @@ def _validate_required_data_reference(
     status = _one_of(payload.get("status"), {"complete", "partial", "failed"}, "required-data status")
     _sha256(payload.get("plan_id"), "required-data plan_id")
     _utc_timestamp(payload.get("sealed_at_utc"), "required-data sealed_at_utc")
-    _relpath(payload.get("required_data_root_relpath"))
+    _required_data_root_relpath(payload.get("required_data_root_relpath"))
     if close_pair <= set(payload):
         _relpath(payload.get("close_advice_required_data_plan_relpath"))
         _sha256(
@@ -1594,7 +1591,22 @@ def _validate_required_data_reference(
             }
             if "reason_code" in row:
                 ready_keys.add("reason_code")
+            if "scan_blob_ref" in row:
+                ready_keys.add("scan_blob_ref")
             _keys(row, ready_keys, f"required-data symbols.{symbol}")
+            if "scan_blob_ref" in row:
+                if not isinstance(row["scan_blob_ref"], Mapping):
+                    _fail(
+                        "REFERENCE_PAYLOAD_INVALID",
+                        "required-data scan blob reference is invalid",
+                    )
+                try:
+                    validate_required_data_scan_blob_ref(row["scan_blob_ref"])
+                except RequiredDataBlobError as exc:
+                    raise RuntimePortfolioSnapshotError(
+                        "RUNTIME_PORTFOLIO_SNAPSHOT_REFERENCE_PAYLOAD_INVALID",
+                        "required-data scan blob reference is invalid",
+                    ) from exc
             for field in (
                 "expected_fetch_contract_sha256",
                 "fetch_policy_hash",
@@ -1772,7 +1784,6 @@ def _validate_candidate_reference(
             _fail("CHOSEN_RESULTS_INVALID", f"{owner} owner scopes differ from chosen results")
         if any(
             str(owner_payload.get("market") or "").strip().upper() != scope["market"]
-            or actual_by_key[key].get("candidate_owner") != owner
             or actual_by_key[key].get("status") != status_by_owner_scope[(owner, *key)]
             for key, scope in expected_by_key.items()
         ):
@@ -1845,6 +1856,71 @@ def _require_section_times(section: Mapping[str, Any], observed: str, received: 
 
 def _manifest_reason_codes(manifest: Mapping[str, Any]) -> list[str]:
     return sorted({str(manifest[field]) for field in ("reason", "error_type", "error_code") if manifest.get(field)})
+
+
+def _ledger_projection_completeness(
+    *,
+    option_manifest: Mapping[str, Any],
+    current: Mapping[str, Any],
+    comparison: Mapping[str, Any],
+) -> dict[str, Any]:
+    comparison_by_name = {
+        row["section"]: row
+        for row in comparison["sections"]
+    }
+    complete = (
+        option_manifest.get("status") == "ready"
+        and (
+            current.get("status") == "trusted"
+            or _is_empty_absent_current_decision(current)
+        )
+        and comparison_by_name["ledger_projection"]["mismatch_count"] == 0
+    )
+    reasons = _manifest_reason_codes(option_manifest)
+    if (
+        current.get("status") != "trusted"
+        and not _is_empty_absent_current_decision(current)
+    ):
+        reasons.append(
+            str(
+                current.get("reason")
+                or f"current_decision:{current.get('status')}"
+            )
+        )
+    if comparison_by_name["ledger_projection"]["mismatch_count"]:
+        reasons.append(f"legacy_comparison:{comparison['status']}")
+    return _completeness(
+        "complete" if complete else "unavailable",
+        [] if complete else reasons,
+        path="ledger_projection",
+    )
+
+
+def _is_empty_absent_current_decision(current: Mapping[str, Any]) -> bool:
+    quality = current.get("lifecycle_quality")
+    account = current.get("account")
+    if not isinstance(account, str):
+        return False
+    try:
+        empty_quality = derive_lifecycle_quality_view(
+            build_lifecycle_quality_fact(
+                account=account,
+                all_case_facts=[],
+                operational_case_facts=[],
+            ),
+            now_ms=1,
+        )
+    except CurrentDecisionProjectionError:
+        return False
+    return (
+        current.get("status") == "absent"
+        and current.get("reason") == "decision_projection_missing"
+        and current.get("payload") is None
+        and current.get("lot_count") == 0
+        and current.get("lifecycle_by_lot") == {}
+        and current.get("lifecycle_by_case") == {}
+        and quality == empty_quality
+    )
 
 
 def _option_freshness(manifest: Mapping[str, Any]) -> dict[str, Any]:
@@ -2097,6 +2173,13 @@ def _relpath(value: Any) -> str:
     if any(part in {"", ".", ".."} or part.lower() == "latest" for part in parts):
         _fail("REFERENCE_PATH_INVALID", "reference path contains a forbidden component")
     return text
+
+
+def _required_data_root_relpath(value: Any) -> str:
+    text = _text(value, "required_data_root_relpath")
+    if text == "../required_data":
+        return text
+    return _relpath(text)
 
 
 def _utc_timestamp(value: Any, path: str) -> str:

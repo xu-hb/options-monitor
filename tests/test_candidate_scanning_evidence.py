@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -12,10 +13,13 @@ from domain.domain.engine.candidate_engine import (
 from src.application.candidate_scanning import (
     CandidateScanConfig,
     CandidateScanDependencies,
+    _calculation_decision_record,
     _load_required_data_rows,
     evidence_summary_from_decisions,
+    project_evidence_scan_status,
     run_candidate_scan,
 )
+from src.application.candidate_models import CandidateContractInput
 from src.application.sell_call_steps import _evidence_scan_status as call_status
 from src.application.sell_put_steps import _evidence_scan_status as put_status
 from src.application.scan_sell_put import run_sell_put_scan
@@ -135,6 +139,61 @@ def test_summary_rejects_accepted_count_drift() -> None:
             decisions=[_decision(accepted=True)],
             accepted_count=0,
         )
+
+
+def test_market_closed_calculation_evidence_preserves_explicit_scan_reason() -> None:
+    contract = CandidateContractInput.from_row(
+        pd.Series(
+            {
+                "symbol": "0700.HK",
+                "market": "HK",
+                "option_type": "put",
+                "contract_symbol": "HK.0700P261029",
+                "opening_contract_status": "market_closed",
+                "opening_contract_reason_codes": ["market_closed"],
+                "underlier_observation_status": "market_closed",
+                "underlier_observation_reason_code": "market_closed",
+            }
+        ),
+        mode="put",
+    )
+    decision = _calculation_decision_record(
+        contract=contract,
+        config=CandidateScanConfig(
+            mode="put",
+            symbols=["0700.HK"],
+            input_root=Path("."),
+            min_dte=7,
+            max_dte=90,
+            min_strike=None,
+            max_strike=None,
+            min_open_interest=None,
+            min_volume=None,
+            max_spread_ratio=None,
+            min_annualized_net_return=None,
+            min_net_income=0.0,
+        ),
+        reason={
+            "rule": "evidence_unavailable",
+            "message": "normalized OpenD opening contract is not ready",
+            "metric_value": {
+                "status": "market_closed",
+                "reason_codes": ["market_closed"],
+            },
+            "threshold": "ready",
+        },
+    )
+
+    summary = evidence_summary_from_decisions(
+        decisions=[decision],
+        accepted_count=0,
+    )
+
+    assert summary["unavailable_by_reason"] == {"market_closed": 1}
+    assert project_evidence_scan_status(
+        evidence=summary,
+        candidate_count=0,
+    ) == ("unavailable", "market_closed")
 
 
 def test_supplied_required_data_frame_avoids_legacy_csv_read(

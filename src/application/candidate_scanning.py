@@ -128,6 +128,16 @@ def _calculation_decision_record(
     opening_status = str(
         normalized_input.get("opening_contract_status") or ""
     ).strip().lower()
+    diagnostic_reason = specific_reason
+    metric_value = detail.get("metric_value")
+    if isinstance(metric_value, Mapping):
+        raw_reason_codes = metric_value.get("reason_codes")
+        if isinstance(raw_reason_codes, (list, tuple)) and raw_reason_codes:
+            diagnostic_reason = str(raw_reason_codes[0])
+        elif metric_value.get("reason_code"):
+            diagnostic_reason = str(metric_value["reason_code"])
+    if opening_status == "market_closed":
+        diagnostic_reason = "market_closed"
     if opening_status == "ineligible":
         reject_reason = REJECT_CONTRACT_INELIGIBLE
     elif opening_status in {"data_unavailable", "market_closed"}:
@@ -157,8 +167,8 @@ def _calculation_decision_record(
                     detail.get("message") or "candidate metrics unavailable"
                 ),
                 "metric_value": {
-                    "reason_code": specific_reason,
-                    "metric_value": detail.get("metric_value"),
+                    "reason_code": diagnostic_reason,
+                    "metric_value": metric_value,
                 },
                 "threshold": detail.get("threshold"),
             }
@@ -340,6 +350,13 @@ def project_evidence_scan_status(
         return "completed", "partial_data" if unresolved > 0 else None
     if unresolved == 0:
         return "completed", "no_candidate"
+    unavailable_by_reason = evidence.get("unavailable_by_reason")
+    if (
+        isinstance(unavailable_by_reason, Mapping)
+        and set(unavailable_by_reason) == {"market_closed"}
+        and int(unavailable_by_reason.get("market_closed") or 0) == unresolved
+    ):
+        return "unavailable", "market_closed"
     evaluated = int(evidence.get("evaluated_contract_count") or 0)
     if evaluated > 0 and unresolved < evaluated:
         return "completed", "partial_data"

@@ -30,6 +30,7 @@ from .current_decision_payload import (
 )
 
 from .current_decision_quality import (
+    build_lifecycle_quality_fact,
     derive_lifecycle_quality_view,
     lifecycle_views_by_lot,
 )
@@ -328,16 +329,31 @@ def finalize_current_decision_projection(
 def _decision_read_unavailable(
     account: str,
     *,
+    now_ms: int,
     status: str,
     reason: str,
+    position_lots: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
+    lots = [dict(row) for row in position_lots]
+    quality = derive_lifecycle_quality_view(
+        build_lifecycle_quality_fact(
+            account=account,
+            all_case_facts=[],
+            operational_case_facts=[],
+        ),
+        now_ms=now_ms,
+    )
     return {
         "schema_version": CURRENT_DECISION_READ_SCHEMA,
         "status": status,
         "account": account,
         "reason": reason,
         "payload": None,
-        "position_lots": [],
+        "position_lots": lots,
+        "lot_count": len(lots),
+        "lifecycle_by_lot": {},
+        "lifecycle_by_case": {},
+        "lifecycle_quality": quality,
     }
 
 def read_current_decision_projection(
@@ -351,6 +367,7 @@ def read_current_decision_projection(
     if not callable(getattr(repo, "read_current_decision_projection_inputs", None)):
         return _decision_read_unavailable(
             account_value,
+            now_ms=instant,
             status="absent",
             reason="sqlite_repository_required",
         )
@@ -359,6 +376,7 @@ def read_current_decision_projection(
     except ProjectorImplementationUnavailable:
         return _decision_read_unavailable(
             account_value,
+            now_ms=instant,
             status="data_unavailable",
             reason="projector_implementation_unavailable",
         )
@@ -374,8 +392,10 @@ def read_current_decision_projection(
         if projection is None:
             return _decision_read_unavailable(
                 account_value,
+                now_ms=instant,
                 status="absent",
                 reason="decision_projection_missing",
+                position_lots=inputs.get("lots") or (),
             )
         if not isinstance(projection, Mapping):
             raise CurrentDecisionProjectionError("decision projection row is invalid")
@@ -420,12 +440,14 @@ def read_current_decision_projection(
     except CurrentDecisionProjectionError as exc:
         return _decision_read_unavailable(
             account_value,
+            now_ms=instant,
             status="data_unavailable",
             reason=str(exc),
         )
     except Exception:
         return _decision_read_unavailable(
             account_value,
+            now_ms=instant,
             status="data_unavailable",
             reason="current_decision_read_failed",
         )

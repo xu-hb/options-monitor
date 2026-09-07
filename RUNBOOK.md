@@ -173,6 +173,19 @@ Daily Brief 是普通调度通知的权威读取面。`symbols_notification.txt`
 2. 先打印缺失字段并确认数据源是否支持。
 3. 必要时切换到人工核验流程。
 
+### Tick 报告 degraded / 运行快照不可用
+
+1. 先检查 `audit/run_logs/` 中同一 `run_id` 的首个 `error` 或 `degraded`，不要只依据日报或兼容通知文本判断运行失败。
+2. 检查 `output_runs/<run_id>/accounts/<account>/state/runtime_portfolio_snapshot.v1.json` 的 `status` 与 `reasons`；缺失、冲突或未证明完整性的持仓/决策数据必须保持 `data_unavailable`，不得手工改写快照为可信。
+3. 若首个失败步骤是 `option_performance_fx_evidence` 且报缺少 Python 包，确认启动脚本和子进程使用同一个虚拟环境解释器；不要把虚拟环境 Python 符号链接解析为系统解释器。
+
+### 强制运行遇到 `market_closed`
+
+`--force` 只跳过调度时间限制，不会绕过开仓报价安全校验。OpenD 在收盘后返回
+`market_closed` 时，系统应不生成开仓候选，并在标的扫描状态中保留
+`market_closed`。这是预期安全状态，不等同于 OpenD 故障或普通
+`data_unavailable`；应等待下一交易时段再评估开仓候选。
+
 ### “非交易时段：不监控”误判
 
 1. 确认 `tick-cron --market us|hk` 与传入的 `config.us.json` / `config.hk.json` 一致。

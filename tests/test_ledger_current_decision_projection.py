@@ -148,6 +148,19 @@ def _bootstrap(
     return payload
 
 
+def test_missing_decision_projection_preserves_current_lots(tmp_path: Path) -> None:
+    current = read_current_decision_projection(
+        _repo(tmp_path),
+        account="lx",
+        now_ms=20_000,
+    )
+
+    assert current["status"] == "absent"
+    assert current["reason"] == "decision_projection_missing"
+    assert current["lot_count"] == 1
+    assert [row["record_id"] for row in current["position_lots"]] == ["lot-lx"]
+
+
 def _discover_projected_case(
     repo: SQLiteOptionPositionsRepository,
 ) -> dict[str, object]:

@@ -437,6 +437,34 @@ def test_worker_request_uses_exact_published_config_authority(
         assert manifests[account]["account_config_sha256"] == (authority.account_config_sha256)
 
 
+def test_context_workers_preserve_virtualenv_python_symlink(tmp_path: Path) -> None:
+    shared, states = _state_dirs(tmp_path, "run-venv-python")
+    authorities = _config_authorities(tmp_path, "run-venv-python")
+    virtualenv_python = tmp_path / "venv" / "bin" / "python"
+    virtualenv_python.parent.mkdir(parents=True)
+    virtualenv_python.symlink_to(sys.executable)
+    commands: list[list[str]] = []
+
+    def _capture(command, **kwargs):
+        commands.append(command)
+        return _CompletedWorker(command, **kwargs)
+
+    prepare_portfolio_contexts(
+        base=tmp_path,
+        repo_root=tmp_path,
+        run_id="run-venv-python",
+        account_config_authorities=authorities,
+        account_state_dirs=states,
+        shared_state_dir=shared,
+        timeout_sec=1,
+        python_executable=virtualenv_python,
+        popen_factory=_capture,
+    )
+
+    assert commands
+    assert {command[0] for command in commands} == {str(virtualenv_python)}
+
+
 def test_invalid_config_authority_is_isolated_from_healthy_prepared_worker(
     tmp_path: Path,
 ) -> None:

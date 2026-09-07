@@ -7,8 +7,13 @@ from pathlib import Path
 
 import pytest
 
+from domain.domain.decision_state_fingerprint import canonical_sha256
 from scripts import benchmark_runtime_portfolio_snapshot as benchmark_owner
 import src.application.ledger.api as ledger_api
+import src.application.runtime_portfolio_snapshot as runtime_snapshot_owner
+from src.application.ledger.current_decision_projection import (
+    read_current_decision_projection,
+)
 from scripts.benchmark_runtime_portfolio_snapshot import (
     CURRENT_SCALE,
     CURRENT_STATE_10X,
@@ -32,6 +37,7 @@ from src.application.runtime_portfolio_snapshot import (
     canonical_json_bytes,
     compare_runtime_portfolio_snapshot,
     load_runtime_portfolio_snapshot,
+    project_ledger_projection_facts,
     publish_runtime_portfolio_snapshot,
     validate_replay_bundle,
     verify_runtime_portfolio_snapshot,
@@ -48,6 +54,28 @@ _INPUT_HASHES = {
     "current_scale": "9a735acf87602227578eee35c7f3a336db59f107ab11ec4e072cc1773dcb2270",
     "current_state_10x": "4c81c6e53d4a0bfac8d4074f8691c3d516ac1df37a0646b8f0ab8b0de0e2063d",
 }
+
+
+def test_absent_current_decision_read_preserves_runtime_snapshot_contract() -> None:
+    current_read = read_current_decision_projection(
+        object(),
+        account="lx",
+        now_ms=1_900_000_000_000,
+    )
+
+    facts = project_ledger_projection_facts(
+        current_decision_read=current_read,
+        decision_state_fingerprint="0" * 64,
+    )
+
+    assert facts["position_lots"] == []
+    assert facts["current_decision"]["status"] == "absent"
+    assert facts["current_decision"]["lot_count"] == 0
+    assert facts["current_decision"]["lifecycle_by_lot"] == {}
+    assert facts["current_decision"]["lifecycle_by_case"] == {}
+    assert facts["current_decision"]["lifecycle_quality"]["account"] == "lx"
+    assert facts["current_decision"]["lifecycle_quality"]["aggregate_by_market"] == []
+    assert facts["current_decision"]["lifecycle_quality"]["operational_cases"] == []
 
 
 def _owner_assembly_kwargs() -> dict:
@@ -114,6 +142,132 @@ def _owner_assembly_kwargs() -> dict:
             row["candidate_owner"]: references[row["relpath"]] for row in chosen["owner_snapshots"]
         },
     }
+
+
+def test_required_data_reference_accepts_root_relative_to_run_state() -> None:
+    kwargs = _owner_assembly_kwargs()
+    manifest = json.loads(kwargs["required_data_manifest_bytes"])
+    manifest["required_data_root_relpath"] = "../required_data"
+    digest = "a" * 64
+    manifest["symbols"]["S0000"]["scan_blob_ref"] = {
+        "schema_version": "required_data_scan_blob_ref.v1",
+        "blob_schema_version": "required_data_scan_blob.v1",
+        "logical_roles": ["raw_json", "required_data_csv"],
+        "codec": "gzip",
+        "codec_version": 1,
+        "blob_sha256": digest,
+        "uncompressed_size_bytes": 10,
+        "compressed_size_bytes": 5,
+        "blob_relpath": f"output_shared/blobs/sha256/aa/{digest}.json.gz",
+        "published_at_utc": "2026-06-01T12:00:00Z",
+    }
+    content = {key: value for key, value in manifest.items() if key != "content_sha256"}
+    manifest["content_sha256"] = canonical_sha256(content)
+    runtime_snapshot_owner._validate_required_data_reference(  # noqa: SLF001
+        manifest,
+        binding={"content_sha256": manifest["content_sha256"]},
+        expected_run_id=kwargs["run_id"],
+    )
+
+
+def test_required_data_reference_wraps_malformed_scan_blob_ref() -> None:
+    kwargs = _owner_assembly_kwargs()
+    manifest = json.loads(kwargs["required_data_manifest_bytes"])
+    manifest["symbols"]["S0000"]["scan_blob_ref"] = "invalid"
+    content = {key: value for key, value in manifest.items() if key != "content_sha256"}
+    manifest["content_sha256"] = canonical_sha256(content)
+
+    with pytest.raises(RuntimePortfolioSnapshotError) as caught:
+        runtime_snapshot_owner._validate_required_data_reference(  # noqa: SLF001
+            manifest,
+            binding={"content_sha256": manifest["content_sha256"]},
+            expected_run_id=kwargs["run_id"],
+        )
+
+    assert caught.value.code == (
+        "RUNTIME_PORTFOLIO_SNAPSHOT_REFERENCE_PAYLOAD_INVALID"
+    )
+
+
+def test_assembler_marks_absent_current_decision_unavailable() -> None:
+    kwargs = _owner_assembly_kwargs()
+    option_payload = json.loads(kwargs["prepared_option_payload_bytes"])
+    option_payload["current_decision_read"] = read_current_decision_projection(
+        object(),
+        account=kwargs["account"],
+        now_ms=1_900_000_000_000,
+    )
+    kwargs["prepared_option_payload_bytes"] = canonical_json_bytes(option_payload)
+    option_manifest = json.loads(kwargs["prepared_option_manifest_bytes"])
+    option_manifest["payload_sha256"] = hashlib.sha256(
+        kwargs["prepared_option_payload_bytes"]
+    ).hexdigest()
+    kwargs["prepared_option_manifest_bytes"] = canonical_json_bytes(option_manifest)
+
+    snapshot, _references = assemble_runtime_portfolio_snapshot(**kwargs)
+
+    ledger = snapshot["sections"]["ledger_projection"]
+    assert ledger["completeness"] == {
+        "status": "unavailable",
+        "reason_codes": ["sqlite_repository_required"],
+    }
+
+
+def _assembly_with_missing_projection_for_empty_ledger() -> dict:
+    kwargs = _owner_assembly_kwargs()
+    option_payload = json.loads(kwargs["prepared_option_payload_bytes"])
+    current = read_current_decision_projection(
+        object(),
+        account=kwargs["account"],
+        now_ms=1_900_000_000_000,
+    )
+    current["reason"] = "decision_projection_missing"
+    option_payload["current_decision_read"] = current
+    option_payload["current_decision_shadow"] = {
+        "schema_version": "current_decision_shadow.v1",
+        "status": "not_available",
+        "reason": "decision_projection_missing",
+        "sections": [],
+        "mismatch_count": 0,
+        "mismatch_samples": [],
+    }
+    kwargs["prepared_option_payload_bytes"] = canonical_json_bytes(option_payload)
+    option_manifest = json.loads(kwargs["prepared_option_manifest_bytes"])
+    option_manifest["payload_sha256"] = hashlib.sha256(
+        kwargs["prepared_option_payload_bytes"]
+    ).hexdigest()
+    kwargs["prepared_option_manifest_bytes"] = canonical_json_bytes(option_manifest)
+    return kwargs
+
+
+def test_assembler_accepts_missing_projection_for_empty_ledger() -> None:
+    kwargs = _assembly_with_missing_projection_for_empty_ledger()
+
+    snapshot, _references = assemble_runtime_portfolio_snapshot(**kwargs)
+
+    assert snapshot["status"] == "trusted"
+    assert snapshot["sections"]["ledger_projection"]["completeness"] == {
+        "status": "complete",
+        "reason_codes": [],
+    }
+
+
+def test_assembler_does_not_trust_tampered_empty_lifecycle_quality() -> None:
+    kwargs = _assembly_with_missing_projection_for_empty_ledger()
+    option_payload = json.loads(kwargs["prepared_option_payload_bytes"])
+    option_payload["current_decision_read"]["lifecycle_quality"][
+        "blocked_consumer_counts"
+    ] = {"option_performance": 1}
+    kwargs["prepared_option_payload_bytes"] = canonical_json_bytes(option_payload)
+    option_manifest = json.loads(kwargs["prepared_option_manifest_bytes"])
+    option_manifest["payload_sha256"] = hashlib.sha256(
+        kwargs["prepared_option_payload_bytes"]
+    ).hexdigest()
+    kwargs["prepared_option_manifest_bytes"] = canonical_json_bytes(option_manifest)
+
+    snapshot, _references = assemble_runtime_portfolio_snapshot(**kwargs)
+
+    assert snapshot["status"] == "data_unavailable"
 
 
 def test_frozen_fixture_contract_hash_is_independent_and_exact() -> None:

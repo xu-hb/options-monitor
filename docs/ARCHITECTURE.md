@@ -252,6 +252,22 @@ Expired-position maintenance is a separate
 `option-positions auto-close-expired` service/timer workflow. It is not a stage
 of the live tick account flow.
 
+Prepared portfolio workers must receive the configured virtual-environment
+interpreter path without resolving its symbolic link. Resolving that link can
+replace the virtual environment interpreter with its system target and make a
+worker lose runtime-only dependencies required by the option-performance and
+FX-evidence path.
+
+After the terminal candidate commit, account execution seals
+`runtime_portfolio_snapshot.v1.json` as a compact replay surface. The snapshot
+validator accepts the canonical producer's `../required_data` reference and
+validated required-data scan-blob reference, while continuing to reject every
+other parent traversal or malformed reference. A missing current-decision
+projection is trusted as an empty ledger only when its complete canonical empty
+shape proves zero lots; a missing projection with existing lots remains
+`data_unavailable`. Cash-occupation completeness is derived from prepared
+option-position readiness, not from that decision projection.
+
 ## Scan And Candidate Flow
 
 Candidate scanning is intentionally split:
@@ -275,6 +291,12 @@ The canonical candidate decisions live in `domain.domain.engine.candidate_engine
 
 Application scanners adapt files, pandas rows, context, and report output around
 that domain engine. Avoid adding parallel ranking implementations in adapters.
+
+`market_closed` is an explicit opening-evidence outcome. A manual `--force` Tick
+may bypass scheduler timing, but it does not relax opening-quote safety checks:
+when OpenD reports a closed market, candidate calculation remains unavailable
+for opening and the sealed strategy status must retain `market_closed` rather
+than collapsing it into generic `data_unavailable`.
 
 Event-risk data is prepared at run scope, not inside candidate scanning:
 

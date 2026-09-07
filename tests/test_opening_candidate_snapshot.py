@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from domain.domain.decision_state_fingerprint import canonical_sha256
+import src.application.runtime_portfolio_snapshot as runtime_snapshot_owner
 from domain.domain.engine import (
     EARNINGS_NEAR_EXPIRY_POLICY_VERSION,
     EARNINGS_NEAR_EXPIRY_WINDOW_DAYS,
@@ -226,6 +227,44 @@ def _publish_opening_manifest(base: Path, payload: dict) -> dict:
         account=str(payload["account"]),
         strategy_policy_sha256=str(payload["strategy_policy_sha256"]),
         sealed_at=NOW,
+    )
+
+
+def test_runtime_snapshot_accepts_canonical_opening_scope_owner_binding(
+    tmp_path: Path,
+) -> None:
+    payload = _seal(tmp_path)
+    manifest = _publish_opening_manifest(tmp_path, payload)
+    account_dir = tmp_path / "output_runs/run-1/accounts/lx"
+    chosen = {
+        field: manifest[field]
+        for field in (
+            "completion_reason",
+            "expected_scopes",
+            "expected_owners",
+            "status_index",
+            "owner_snapshots",
+        )
+    }
+    supplied = {
+        manifest["status_index"]["relpath"]: (
+            account_dir / manifest["status_index"]["relpath"]
+        ).read_bytes(),
+        **{
+            owner["relpath"]: (account_dir / owner["relpath"]).read_bytes()
+            for owner in manifest["owner_snapshots"]
+        },
+    }
+
+    runtime_snapshot_owner._validate_candidate_reference(  # noqa: SLF001
+        manifest,
+        binding={"content_sha256": manifest["content_sha256"]},
+        chosen=chosen,
+        supplied=supplied,
+        expected_run_id="run-1",
+        expected_account="lx",
+        expected_account_config_sha256="a" * 64,
+        expected_required_data_sha256=payload["required_data_manifest_sha256"],
     )
 
 
