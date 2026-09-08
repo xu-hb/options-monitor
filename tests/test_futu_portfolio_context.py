@@ -735,6 +735,52 @@ def test_build_futu_portfolio_context_prefers_explicit_futu_cash_fields_over_leg
     assert out["cash_balance_unavailable_by_row"] == {}
 
 
+def test_build_futu_portfolio_context_uses_currency_scoped_single_market_cash() -> None:
+    from src.application.futu_portfolio_context import build_futu_portfolio_context
+
+    out = build_futu_portfolio_context(
+        balance_rows=[
+            {
+                "currency": "HKD",
+                "cash": 80_000.0,
+                "net_cash_power": 75_000.0,
+            },
+        ],
+        position_rows=[],
+        account="lx",
+        trd_env="SIMULATE",
+    )
+
+    assert out["cash_by_currency"] == {"HKD": 80_000.0}
+    assert out["cash_components_by_currency"] == {"HKD": {"cash": 80_000.0}}
+    assert out["cash_power_by_currency"] == {"HKD": 75_000.0}
+    assert out["cash_source"] == "futu_cash_like_assets"
+    assert out["cash_balance_reliable"] is True
+    assert out["cash_balance_unavailable_by_row"] == {}
+
+
+def test_build_futu_portfolio_context_maps_simulated_hk_generic_cash_without_row_currency() -> None:
+    from src.application.futu_portfolio_context import build_futu_portfolio_context
+
+    out = build_futu_portfolio_context(
+        balance_rows=[
+            {
+                "currency": "N/A",
+                "cash": 1_000_000.0,
+                "net_cash_power": 900_000.0,
+            },
+        ],
+        position_rows=[],
+        account="lx",
+        trd_env="SIMULATE",
+        capacity_market="hk",
+    )
+
+    assert out["cash_by_currency"] == {"HKD": 1_000_000.0}
+    assert out["cash_power_by_currency"] == {"HKD": 900_000.0}
+    assert out["cash_balance_reliable"] is True
+
+
 def test_build_futu_portfolio_context_rejects_all_sdk_missing_cash_fields() -> None:
     from src.application.futu_portfolio_context import build_futu_portfolio_context
 

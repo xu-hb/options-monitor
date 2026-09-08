@@ -53,6 +53,7 @@ _FUTU_NET_CASH_POWER_FIELDS_BY_CCY = {
     "MYR": ("myr_net_cash_power",),
 }
 _FUTU_FUND_ASSET_FIELDS = ("fund_assets", "mmf_assets", "money_fund_assets")
+_SIMULATE_SINGLE_MARKET_CURRENCY = {"hk": "HKD", "us": "USD"}
 
 
 def _resolve_trd_env(value: Any) -> str:
@@ -383,6 +384,7 @@ def _extract_cash_components(
     row: Mapping[str, Any],
     *,
     base_currency: str,
+    generic_cash_currency: str | None = None,
 ) -> tuple[list[tuple[str, str, float]], str, dict[str, str]]:
     """Return cash-like components from a Futu accinfo row.
 
@@ -390,8 +392,12 @@ def _extract_cash_components(
     for multi-currency accounts. Only explicit currency cash/fund fields are
     accepted here.
     """
+    raw_currency = _pick(row, "currency", "cash_currency", "currency_code", "ccy")
+    explicit_currency = normalize_currency(raw_currency)
+    if explicit_currency not in _FUTU_CASH_FIELDS_BY_CCY:
+        explicit_currency = None
     row_currency = _normalize_currency(
-        _pick(row, "currency", "cash_currency", "currency_code", "ccy"),
+        raw_currency,
         fallback=base_currency,
     )
     components: list[tuple[str, str, float]] = []
@@ -422,18 +428,33 @@ def _extract_cash_components(
     for currency, fields in _FUTU_CASH_FIELDS_BY_CCY.items():
         append_first_present(currency, fields)
 
+    # A Futu simulation account may expose only generic ``cash``. Its currency
+    # must be identified by OpenD or by the single-market account binding.
+    if not components and generic_cash_currency:
+        append_first_present(generic_cash_currency, ("cash",))
+
     if components:
         return components, "futu_cash_like_assets", unavailable
     return [], "empty", unavailable
 
 
-def _extract_net_cash_power(row: Mapping[str, Any]) -> dict[str, float]:
+def _extract_net_cash_power(
+    row: Mapping[str, Any],
+    *,
+    generic_cash_currency: str | None = None,
+) -> dict[str, float]:
     out: dict[str, float] = {}
     for currency, fields in _FUTU_NET_CASH_POWER_FIELDS_BY_CCY.items():
         value = _to_float(_pick(row, *fields))
         if value is None:
             continue
         out[_normalize_currency(currency, fallback=currency)] = float(value)
+    if out:
+        return out
+
+    generic_power = _to_float(_pick(row, "net_cash_power"))
+    if generic_cash_currency and generic_power is not None:
+        out[generic_cash_currency] = float(generic_power)
     return out
 
 
@@ -629,10 +650,26 @@ def build_futu_portfolio_context(
         ]
 
     base_ccy = _normalize_currency(base_currency, fallback="CNY")
+    is_simulate_account = str(trd_env or "").strip().upper() == "SIMULATE"
+    simulate_single_market_currency = _SIMULATE_SINGLE_MARKET_CURRENCY.get(
+        str(capacity_market or "").strip().lower()
+    )
     deduped_balance_rows = _dedup_balance_rows(balance_rows)
     for row_index, row in enumerate(deduped_balance_rows, start=1):
+        row_currency = normalize_currency(
+            _pick(row, "currency", "cash_currency", "currency_code", "ccy")
+        )
+        generic_cash_currency = None
+        if is_simulate_account:
+            generic_cash_currency = (
+                row_currency
+                if row_currency in _FUTU_CASH_FIELDS_BY_CCY
+                else simulate_single_market_currency
+            )
         components, source_kind, unavailable = _extract_cash_components(
-            row, base_currency=base_ccy
+            row,
+            base_currency=base_ccy,
+            generic_cash_currency=generic_cash_currency,
         )
         for field, reason in unavailable.items():
             cash_balance_unavailable_by_row[
@@ -649,7 +686,10 @@ def build_futu_portfolio_context(
                 value=amount,
             )
 
-        for currency, amount in _extract_net_cash_power(row).items():
+        for currency, amount in _extract_net_cash_power(
+            row,
+            generic_cash_currency=generic_cash_currency,
+        ).items():
             cash_power_by_currency[currency] = cash_power_by_currency.get(currency, 0.0) + amount
 
     if not cash_source_kinds and not cash_balance_unavailable_by_row:
