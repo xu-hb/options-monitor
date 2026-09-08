@@ -8,6 +8,7 @@ user.md
 *.pyc
 .DS_Store
 .venv/
+venv/
 __pycache__/
 .env/
 *.env.local
