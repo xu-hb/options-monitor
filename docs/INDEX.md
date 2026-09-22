@@ -71,6 +71,7 @@
 - [Tool Reference](TOOL_REFERENCE.md)：公开工具分类、风险 metadata 和常用示例。
 - [OM Capability Surfaces](OM_AGENT_CAPABILITY_MAP.md)：Tool Gateway、Control、Bot 的能力边界。
 - [Inbound Control](INBOUND_CONTROL.md)：确定性 Control、pending operation 和 channel 安全。
+- [Assistant Commands](ASSISTANT_COMMANDS.md)：对话命令速查、写操作确认流程、字段格式与开关。
 - [Bot PRD](BOT_PRD.md)：Bot产品合同及项目内通用只读助理需求。
 - [Bot / Python runtime / Scene v6](BOT_DESIGN.md)：策略、报错与过滤原因问答，个人记忆、上下文和只读工具合同。
 - [Legacy Pi storage](PI_AGENT_CORE_INTEGRATION.md)：历史会话保留、离线转换与旧版本回滚边界。
