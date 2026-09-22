@@ -10,7 +10,11 @@ from src.application.agent_tool_contracts import AgentToolError
 from src.application.channels.status import build_channel_status
 from src.application.environment_status import build_effective_env_with_status
 from src.application.wheel.runtime_readiness import build_wheel_activation_readiness
-from src.application.ledger.api import ledger_store_payload
+from src.application.ledger.api import (
+    ledger_store_payload,
+    open_trade_reconciliation_evidence_repo,
+    summarize_position_lot_shadow_status,
+)
 from src.application.release_target import compare_versions
 from src.application.runtime_config_freshness import (
     GENERATED_KEY,
@@ -392,19 +396,54 @@ def _auto_close_receipt_summary(maintenance_json: dict[str, Any] | Any) -> dict[
     }
 
 
-def _ledger_context_summary(context_info: dict[str, Any] | Any) -> dict[str, Any]:
+def _ledger_shadow_summary_from_sqlite(
+    ledger_store: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Rebuild the ledger shadow summary from a read-only SQLite snapshot.
+
+    The option positions context cache is invalidated on every manual ledger
+    write, and the prepared tick path never repopulates it. Reporting that
+    missing cache as "ledger unavailable" is wrong: the SQLite ledger is the
+    authority and is still readable. Rebuild the same field set the cache
+    would have carried, without opening the write-capable repository (which
+    can trigger startup projection recovery).
+    """
+
+    sqlite_path = (ledger_store or {}).get("sqlite_path")
+    if not sqlite_path:
+        return {"available": False, "status": "unavailable", "fail_closed": False}
+    try:
+        repo = open_trade_reconciliation_evidence_repo(sqlite_path)
+        shadow = summarize_position_lot_shadow_status(repo.list_position_lots())
+    except Exception:
+        return {"available": False, "status": "unavailable", "fail_closed": False}
+    return {
+        "available": True,
+        "status": shadow.get("status") or "unknown",
+        "reason": shadow.get("reason"),
+        "read_model": shadow.get("read_model") or "ledger_shadow",
+        "fail_closed": bool(shadow.get("fail_closed")),
+        "source_record_count": shadow.get("source_record_count"),
+        "imported_event_count": shadow.get("imported_event_count"),
+        "lot_count": shadow.get("lot_count"),
+        "open_lot_count": shadow.get("open_lot_count"),
+        "view_count": shadow.get("view_count"),
+    }
+
+
+def _ledger_context_summary(
+    context_info: dict[str, Any] | Any,
+    *,
+    ledger_store: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if not isinstance(context_info, dict):
-        return {"available": False, "status": "unknown", "fail_closed": False}
+        return _ledger_shadow_summary_from_sqlite(ledger_store)
     payload = context_info.get("json")
     context: dict[str, Any] = payload if isinstance(payload, dict) else {}
     ledger_raw = context.get("ledger")
     ledger: dict[str, Any] = ledger_raw if isinstance(ledger_raw, dict) else {}
     if not ledger:
-        return {
-            "available": bool(context_info.get("exists")),
-            "status": "unknown",
-            "fail_closed": False,
-        }
+        return _ledger_shadow_summary_from_sqlite(ledger_store)
     return {
         "available": True,
         "status": ledger.get("status") or "unknown",
@@ -2428,7 +2467,10 @@ def private_runtime_status_tool(
         warning_codes.append("AUTO_CLOSE_FAILED")
     if str(trigger_context.get("delivery_mode") or "").lower() == "none":
         warnings.append("Outer delivery.mode is none; the task runner will not announce run output.")
-    ledger_context_summary = _ledger_context_summary(option_positions_context)
+    ledger_context_summary = _ledger_context_summary(
+        option_positions_context,
+        ledger_store=ledger_store,
+    )
     if ledger_context_summary.get("fail_closed"):
         warnings.append("Ledger shadow context is fail-closed; risk reads should be blocked until repaired.")
     notification_diagnosis = _notification_diagnosis(
