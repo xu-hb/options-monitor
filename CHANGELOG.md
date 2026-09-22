@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 3.5.16 - 2026-09-22
+
+### Improvements
+- Documented the assistant slash commands, write-operation confirmation flow, required field formats, and environment switches.
+
+### Bug Fixes
+- Rebuilt the ledger availability summary from a read-only SQLite snapshot when the option positions context cache is missing, so runtime status no longer reports a healthy ledger as unavailable after a manual trade write invalidates that cache.
+
 ## 3.5.15 - 2026-09-18
 
 ### Bug Fixes
