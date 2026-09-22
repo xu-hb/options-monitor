@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 3.5.16 - 2026-09-22
+## 3.5.16-xhb.20260922 - 2026-09-22
 
 ### Improvements
 - Documented the assistant slash commands, write-operation confirmation flow, required field formats, and environment switches.
